@@ -1,0 +1,31 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from config import ORIG
+
+train = pd.read_csv(ORIG / "data" / "customer_clv_train.csv")
+test = pd.read_csv(ORIG / "data" / "customer_clv_test.csv")
+transactions = pd.read_csv(
+    ORIG / "data" / "transactions_2016_2017.csv", dtype=str, low_memory=False
+)
+
+transactions["order_date"] = pd.to_datetime(transactions["order_date"], errors="coerce")
+transactions["pack_date"] = pd.to_datetime(transactions["pack_date"], errors="coerce")
+
+products_per_sale = transactions.groupby("sale_id")["prod_id"].nunique().reset_index()
+products_per_sale.rename(columns={"prod_id": "num_products"}, inplace=True)
+products_per_sale["multiple_products"] = products_per_sale["num_products"] > 1
+
+print(products_per_sale["num_products"].value_counts().sort_index())
+
+check_consistency = (
+    transactions.groupby("sale_id")
+    .agg({"order_date": "nunique", "cust_id": "nunique"})
+    .reset_index()
+)
+check_consistency["order_date_consistent"] = check_consistency["order_date"] == 1
+check_consistency["customer_id_consistent"] = check_consistency["cust_id"] == 1
+
+print(check_consistency["order_date_consistent"].value_counts())
+print(check_consistency["customer_id_consistent"].value_counts())
