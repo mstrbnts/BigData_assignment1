@@ -1,5 +1,6 @@
 data/bld
 data/original_data/data
+data/original_data/__MACOSX
 __pycache__/
 *.pyc
 *.pyo
