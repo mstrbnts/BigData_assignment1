@@ -1,4 +1,5 @@
 data/bld
+data/original_data/data
 __pycache__/
 *.pyc
 *.pyo
