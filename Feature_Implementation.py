@@ -4,7 +4,7 @@ import numpy as np
 from config import ORIG
 
 # Import data
-df_cal = pd.read_csv(ORIG / "calibration_transactions.csv")
+df_cal = pd.read_csv("data/calibration_transactions.csv")
 pd.set_option('display.max_columns', None)
 
 
@@ -108,4 +108,4 @@ features = build_customer_features(df_cal)
 print("Features are made")
 
 # Run to get csv file with features, uncomment to get a csv
-# features.to_csv("data/features.csv", index=False)
+features.to_csv("data/features.csv", index=False)
