@@ -15,6 +15,7 @@ class TwoStagePipeline:
     The pipeline is set up in such a way that if you want to change the model you just need to modify it in the constructor (__init__ function)
     If needed you can add a new function, but try to keep a coherent structure.
     Every already existing function can be modified but leave a comment when you modify please.
+    LEGIT functions shouldn't be modified normally.
 
     Two-stage CLV pipeline
 
@@ -79,7 +80,8 @@ class TwoStagePipeline:
         self.best_threshold = None
         self.best_threshold_mae = float("inf")
         self.best_threshold_spearman = None
-
+    
+    #LEGIT
     def load_data(self):
         self.features = pd.read_csv(self.features_path)
         self.train = pd.read_csv(self.train_path)
@@ -106,7 +108,8 @@ class TwoStagePipeline:
                 self.X_test_full[col] = self.X_test_full[col].map(
                     lambda x: x.toordinal() if pd.notnull(x) else np.nan
                 )
-
+    
+    #LEGIT
     def prepare_training_data(self):
         self.df["target_binary"] = (self.df["revenue_2018_2019"] > 0).astype(int)
         self.df["target_reg"] = self.df["revenue_2018_2019"]
@@ -126,7 +129,8 @@ class TwoStagePipeline:
 
         print(f"Training matrix shape: {self.X.shape}")
         print(f"Positive buyers ratio: {self.y_class.mean():.4f}")
-
+    
+    #LEGIT
     def split_data(self):
         (
             self.X_train,
@@ -259,6 +263,7 @@ class TwoStagePipeline:
             np.log1p(self.y_reg[mask_full])
         )
 
+    #LEGIT
     def prepare_test_data(self):
         X_test = self.X_test_full.drop(columns=["cust_id"], errors="ignore")
         X_test = X_test.select_dtypes(include=[np.number]).copy()
@@ -308,6 +313,7 @@ class TwoStagePipeline:
 
         return pred_test
 
+    #LEGIT
     def save_submission(self, pred_test, filename="submission.csv"):
         submission = pd.DataFrame({
             "cust_id": self.X_test_full["cust_id"],
