@@ -4,13 +4,22 @@ import numpy as np
 from config import ORIG
 
 # Import data
-df_cal = pd.read_csv("data/calibration_transactions.csv")
+df_tx = pd.read_csv(
+    "data/original_data/data/transactions_2016_2017.csv",
+    low_memory=False
+)
 pd.set_option('display.max_columns', None)
 
 
 # Feature pipeline
 def build_customer_features(df):
     df = df.copy()
+    df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+    df["pack_date"] = pd.to_datetime(df["pack_date"], errors="coerce")
+    df["sale_revenue"] = pd.to_numeric(df["sale_revenue"], errors="coerce")
+    df["sale_discount_applied"] = pd.to_numeric(df["sale_discount_applied"], errors="coerce")
+    df["prod_size"] = pd.to_numeric(df["prod_size"], errors="coerce")
+
 
     # Dates and returns
     df["order_date"] = pd.to_datetime(df["order_date"])
@@ -104,7 +113,7 @@ def build_customer_features(df):
     return agg.reset_index()
 
 # Implement features
-features = build_customer_features(df_cal)
+features = build_customer_features(df_tx)
 print("Features are made")
 
 # Run to get csv file with features, uncomment to get a csv
