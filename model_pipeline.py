@@ -2,9 +2,11 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+from sklearn.base import clone
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, roc_auc_score
 from scipy.stats import spearmanr
+
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 
@@ -30,12 +32,20 @@ class TwoStagePipeline:
 
     """
 
-    def __init__(self):
-        self.BASE_DIR = Path(__file__).resolve().parent
+    def __init__(
+        self,
+        classifier=None,
+        regressor=None,
+        base_dir=None,
+        features_path=None,
+        train_path=None,
+        test_path=None
+    ):
+        self.BASE_DIR = Path(base_dir) if base_dir else Path(__file__).resolve().parent
 
-        self.features_path = self.BASE_DIR / "data" / "features.csv"
-        self.train_path = self.BASE_DIR / "data" / "original_data" / "data" / "customer_clv_train.csv"
-        self.test_path = self.BASE_DIR / "data" / "original_data" / "data" / "customer_clv_test.csv"
+        self.features_path = Path(features_path) if features_path else self.BASE_DIR / "data" / "features.csv"
+        self.train_path = Path(train_path) if train_path else self.BASE_DIR / "data" / "original_data" / "data" / "customer_clv_train.csv"
+        self.test_path = Path(test_path) if test_path else self.BASE_DIR / "data" / "original_data" / "data" / "customer_clv_test.csv"
 
         self.date_cols = ["first_purchase", "last_purchase"]
 
@@ -58,7 +68,7 @@ class TwoStagePipeline:
 
         self.feature_columns = None
 
-        self.clf = RandomForestClassifier(
+        self.clf = classifier if classifier is not None else RandomForestClassifier(
             n_estimators=400,
             max_depth=12,
             min_samples_leaf=5,
@@ -67,7 +77,7 @@ class TwoStagePipeline:
             n_jobs=-1
         )
 
-        self.reg = RandomForestRegressor(
+        self.reg = regressor if regressor is not None else RandomForestRegressor(
             n_estimators=300,
             max_depth=12,
             min_samples_leaf=5,
@@ -80,8 +90,27 @@ class TwoStagePipeline:
         self.best_threshold = None
         self.best_threshold_mae = float("inf")
         self.best_threshold_spearman = None
-    
-    #LEGIT
+        self.chosen_strategy = None
+
+    def set_classifier(self, classifier):
+        """ setter for the classifier model."""
+        self.clf = classifier
+
+    def set_regressor(self, regressor):
+        """ Setter for the regressor model."""
+        self.reg = regressor
+
+    def set_models(self, classifier=None, regressor=None):
+        """Setter for the Models"""
+        if classifier is not None:
+            self.clf = classifier
+        if regressor is not None:
+            self.reg = regressor
+
+    def get_models(self):
+        """ getter for the current models."""
+        return {"classifier": self.clf, "regressor": self.reg}
+
     def load_data(self):
         self.features = pd.read_csv(self.features_path)
         self.train = pd.read_csv(self.train_path)
@@ -108,8 +137,7 @@ class TwoStagePipeline:
                 self.X_test_full[col] = self.X_test_full[col].map(
                     lambda x: x.toordinal() if pd.notnull(x) else np.nan
                 )
-    
-    #LEGIT
+
     def prepare_training_data(self):
         self.df["target_binary"] = (self.df["revenue_2018_2019"] > 0).astype(int)
         self.df["target_reg"] = self.df["revenue_2018_2019"]
@@ -129,8 +157,7 @@ class TwoStagePipeline:
 
         print(f"Training matrix shape: {self.X.shape}")
         print(f"Positive buyers ratio: {self.y_class.mean():.4f}")
-    
-    #LEGIT
+
     def split_data(self):
         (
             self.X_train,
@@ -169,12 +196,35 @@ class TwoStagePipeline:
         corr = spearmanr(y_true, y_pred).correlation
         return 0.0 if pd.isna(corr) else corr
 
+    def _predict_classifier_proba(self, X):
+        """
+        Return probability of class 1.
+
+        The classifier must support predict_proba(X) and return probabilities
+        for both classes [0, 1].
+        """
+        if not hasattr(self.clf, "predict_proba"):
+            raise AttributeError(
+                f"{self.clf.__class__.__name__} does not implement predict_proba(). "
+                "For stage 1 you need a probabilistic classifier."
+            )
+
+        proba = self.clf.predict_proba(X)
+
+        if proba.ndim != 2 or proba.shape[1] < 2:
+            raise ValueError(
+                f"{self.clf.__class__.__name__} predict_proba() did not return "
+                "a 2-class probability matrix."
+            )
+
+        return proba[:, 1]
+
     def evaluate_probability_weighted(self):
-        proba_val = self.clf.predict_proba(self.X_val)[:, 1]
+        proba_val = self._predict_classifier_proba(self.X_val)
 
         auc = roc_auc_score(self.y_class_val, proba_val)
         print(f"\nClassifier AUC: {auc:.4f}")
-        print(f"Validation probability stats:")
+        print("Validation probability stats:")
         print(f"  min  = {proba_val.min():.4f}")
         print(f"  max  = {proba_val.max():.4f}")
         print(f"  mean = {proba_val.mean():.4f}")
@@ -195,7 +245,11 @@ class TwoStagePipeline:
 
     def evaluate_threshold_versions(self):
         candidate_thresholds = np.arange(0.05, 0.55, 0.05)
-        proba_val = self.clf.predict_proba(self.X_val)[:, 1]
+        proba_val = self._predict_classifier_proba(self.X_val)
+        self.best_threshold = None
+        self.best_threshold_mae = float("inf")
+        self.best_threshold_spearman = None
+        self.val_pred_threshold = None
 
         for t in candidate_thresholds:
             pred_class_val = (proba_val >= t).astype(int)
@@ -245,13 +299,18 @@ class TwoStagePipeline:
         print(f"Hard threshold approach  -> MAE={mae_thresh:.4f}, Spearman={sp_thresh:.4f}")
 
         if mae_expected <= mae_thresh:
+            self.chosen_strategy = "expected"
             print("Chosen final strategy: probability-weighted expected revenue")
-            return "expected"
         else:
+            self.chosen_strategy = "threshold"
             print("Chosen final strategy: hard threshold")
-            return "threshold"
+
+        return self.chosen_strategy
 
     def fit_full_data(self):
+        self.clf = clone(self.clf)
+        self.reg = clone(self.reg)
+
         self.clf.fit(self.X, self.y_class)
 
         mask_full = self.y_class == 1
@@ -263,7 +322,6 @@ class TwoStagePipeline:
             np.log1p(self.y_reg[mask_full])
         )
 
-    #LEGIT
     def prepare_test_data(self):
         X_test = self.X_test_full.drop(columns=["cust_id"], errors="ignore")
         X_test = X_test.select_dtypes(include=[np.number]).copy()
@@ -276,14 +334,14 @@ class TwoStagePipeline:
         return X_test
 
     def predict_test_expected(self, X_test):
-        proba_test = self.clf.predict_proba(X_test)[:, 1]
+        proba_test = self._predict_classifier_proba(X_test)
         reg_pred = np.expm1(self.reg.predict(X_test))
         reg_pred = np.clip(reg_pred, 0, None)
 
         pred_test = proba_test * reg_pred
         pred_test = np.clip(pred_test, 0, None)
 
-        print(f"Predictions summary (expected value):")
+        print("Predictions summary (expected value):")
         print(f"  min  = {pred_test.min():.4f}")
         print(f"  max  = {pred_test.max():.4f}")
         print(f"  mean = {pred_test.mean():.4f}")
@@ -291,7 +349,7 @@ class TwoStagePipeline:
         return pred_test
 
     def predict_test_threshold(self, X_test):
-        proba_test = self.clf.predict_proba(X_test)[:, 1]
+        proba_test = self._predict_classifier_proba(X_test)
         pred_class_test = (proba_test >= self.best_threshold).astype(int)
 
         pred_test = np.zeros(len(X_test))
@@ -306,14 +364,13 @@ class TwoStagePipeline:
 
         pred_test = np.clip(pred_test, 0, None)
 
-        print(f"Predictions summary (threshold):")
+        print("Predictions summary (threshold):")
         print(f"  min  = {pred_test.min():.4f}")
         print(f"  max  = {pred_test.max():.4f}")
         print(f"  mean = {pred_test.mean():.4f}")
 
         return pred_test
 
-    #LEGIT
     def save_submission(self, pred_test, filename="submission.csv"):
         submission = pd.DataFrame({
             "cust_id": self.X_test_full["cust_id"],
@@ -346,8 +403,3 @@ class TwoStagePipeline:
         else:
             pred_test = self.predict_test_threshold(X_test)
             self.save_submission(pred_test, filename="submission_threshold.csv")
-
-
-if __name__ == "__main__":
-    pipeline = TwoStagePipeline()
-    pipeline.run()
