@@ -4,3 +4,8 @@ data/original_data/__MACOSX
 __pycache__/
 *.pyc
 *.pyo
+AutogluonModels/
+*.pkl
+*.pickle
+*.model
+*.json
