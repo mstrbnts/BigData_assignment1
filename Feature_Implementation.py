@@ -2,6 +2,8 @@
 import pandas as pd
 import numpy as np
 from config import ORIG
+from lifetimes import BetaGeoFitter, GammaGammaFitter
+from lifetimes.utils import summary_data_from_transaction_data
 
 # Import data
 df_tx = pd.read_csv(
@@ -235,6 +237,48 @@ def build_customer_features(df):
 # Implement features
 features = build_customer_features(df_tx)
 print("Features are made")
+print(features.head())
+print("Starting enriched features")
+
+# Lifetimes packages features
+df_tx["order_date"] = pd.to_datetime(df_tx["order_date"])
+
+df_rfm = summary_data_from_transaction_data(
+    df_tx, 
+    'cust_id', 
+    'order_date', 
+    monetary_value_col='sale_revenue',
+    observation_period_end='2017-12-31'
+).reset_index()
+
+# Fit BG/NBD
+bgf = BetaGeoFitter(penalizer_coef=0.01).fit(df_rfm['frequency'], df_rfm['recency'], df_rfm['T'])
+
+# Fit Gamma-Gamma (alleen positieve herhaalaankopers)
+returning_customers = df_rfm[(df_rfm['frequency'] > 0) & (df_rfm['monetary_value'] > 0)]
+ggf = GammaGammaFitter(penalizer_coef=0.01).fit(returning_customers['frequency'], returning_customers['monetary_value'])
+
+# Enriched features
+df_rfm['prob_alive'] = bgf.conditional_probability_alive(df_rfm['frequency'], df_rfm['recency'], df_rfm['T'])
+df_rfm['pred_num_purchases'] = bgf.predict(24, df_rfm['frequency'], df_rfm['recency'], df_rfm['T']) # 24 maanden
+df_rfm['expected_avg_sales'] = 0.0
+df_rfm.loc[returning_customers.index, 'expected_avg_sales'] = (
+    ggf.conditional_expected_average_profit(
+        returning_customers['frequency'],
+        returning_customers['monetary_value']
+    ).clip(0)
+)
+
+# 3. Merge with main features
+lifetimes_to_add = df_rfm[['cust_id', 'prob_alive', 'pred_num_purchases', 'expected_avg_sales']]
+features = features.merge(lifetimes_to_add, on='cust_id', how='left')
+
+# Vul eventuele missende waarden in met 0 (voor nieuwe klanten zonder geschiedenis)
+features[['prob_alive', 'pred_num_purchases', 'expected_avg_sales']] = \
+    features[['prob_alive', 'pred_num_purchases', 'expected_avg_sales']].fillna(0)
+
+print("Features are enriched with Lifetimes data")
+print(features.head())
 
 # Run to get csv file with features, uncomment to get a csv
-features.to_csv("data/features.csv", index=False)
+features.to_csv("data/features_enriched.csv", index=False)
