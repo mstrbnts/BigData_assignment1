@@ -1,13 +1,12 @@
 # Import needed packages
 import pandas as pd
 import numpy as np
-from config import ORIG
 from lifetimes import BetaGeoFitter, GammaGammaFitter
 from lifetimes.utils import summary_data_from_transaction_data
 
 # Import data
 df_tx = pd.read_csv(
-    "data/original_data/data/transactions_2016_2017.csv",
+    r"C:\Users\Marte\Documents\SCHOOL\2024_2026_KUL\2025-2026\SEMESTER 2\Advanced Analytics in a Big Data World\Assignment1\BigData_assignment1\data\original_data\transactions_2016_2017.csv",
     low_memory=False
 )
 pd.set_option('display.max_columns', None)
@@ -16,6 +15,9 @@ pd.set_option('display.max_columns', None)
 # Feature pipeline
 def build_customer_features(df):
     df = df.copy()
+    reference_date = pd.Timestamp("2017-12-31")
+    last_90d_start = reference_date - pd.Timedelta(days=89)
+    window_days = [30, 90, 180, 365]
 
     df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
     df["pack_date"] = pd.to_datetime(df["pack_date"], errors="coerce")
@@ -50,6 +52,14 @@ def build_customer_features(df):
     # Non-returned items only
     df_non_returned = df[df["is_returned"] == 0].copy()
 
+    # Recent windows based on the fixed feature reference date
+    windowed_non_returned = {}
+    for days in window_days:
+        start_date = reference_date - pd.Timedelta(days=days - 1)
+        windowed_non_returned[days] = df_non_returned[
+            df_non_returned["order_date"].between(start_date, reference_date)
+        ].copy()
+
     # Basic features
     agg = df.groupby("cust_id").agg(
         n_items=("sale_id", "count"),
@@ -77,6 +87,18 @@ def build_customer_features(df):
     agg["discount_ratio"] = agg["total_discount"] / (
         agg["total_revenue_net"] + agg["total_discount"]
     ).replace(0, np.nan)
+    agg["avg_days_between_purchases"] = agg["customer_lifetime_days"] / agg["n_sales"].replace(0, np.nan)
+    agg["monetary_per_item"] = agg["total_revenue_net"] / agg["n_items_non_returned"].replace(0, np.nan)
+    agg["days_since_last_purchase"] = (reference_date - agg["last_purchase"]).dt.days
+    agg["days_since_last_vs_avg"] = (
+        agg["days_since_last_purchase"] / agg["avg_days_between_purchases"].replace(0, np.nan)
+    )
+    agg["days_from_first_purchase_to_reference"] = (
+        reference_date - agg["first_purchase"]
+    ).dt.days
+    agg["recency_ratio"] = agg["customer_lifetime_days"] / (
+        agg["days_from_first_purchase_to_reference"].replace(0, np.nan)
+    )
 
     # @Dorian
     # Purchase frequency
@@ -102,6 +124,40 @@ def build_customer_features(df):
         max_days_between_orders="max"
     )
     agg = agg.join(gap_stats)
+
+    latest_gap = (
+        order_dates.groupby("cust_id")["days_between_orders"]
+        .last()
+        .rename("last_days_between_orders")
+    )
+    agg = agg.join(latest_gap)
+    agg["last_vs_avg_days_between_orders"] = agg["last_days_between_orders"] / (
+        agg["avg_days_between_orders"].replace(0, np.nan)
+    )
+    agg["gap_cv"] = agg["std_days_between_orders"] / (
+        agg["avg_days_between_orders"].replace(0, np.nan)
+    )
+
+    recent_gap_means = (
+        order_dates.dropna(subset=["days_between_orders"])
+        .groupby("cust_id")
+        .tail(2)
+        .groupby("cust_id")["days_between_orders"]
+        .mean()
+        .rename("avg_last_2_gaps")
+    )
+    agg = agg.join(recent_gap_means)
+    agg["recent_gap_trend"] = agg["avg_last_2_gaps"] / (
+        agg["avg_days_between_orders"].replace(0, np.nan)
+    )
+
+    fast_repeat_60d = (
+        order_dates.assign(fast_repeat_60d=(order_dates["days_between_orders"] <= 60).astype(float))
+        .groupby("cust_id")["fast_repeat_60d"]
+        .mean()
+        .rename("share_fast_repeat_60d")
+    )
+    agg = agg.join(fast_repeat_60d)
 
     # @Dorian
     # Pack and shipping timing
@@ -163,6 +219,34 @@ def build_customer_features(df):
         agg["top_season_share"] = season_share.max(axis=1)
         agg["n_unique_seasons"] = (season_counts > 0).sum(axis=1)
 
+    # Calendar seasonality based on actual purchase dates
+    order_calendar = df_non_returned[["cust_id", "order_date", "sale_id"]].dropna(subset=["order_date"]).copy()
+    order_calendar["order_month"] = order_calendar["order_date"].dt.month
+    order_calendar["order_quarter"] = order_calendar["order_date"].dt.quarter
+    order_calendar["year_month"] = order_calendar["order_date"].dt.to_period("M").astype(str)
+
+    active_months = order_calendar.groupby("cust_id")["year_month"].nunique().rename("n_active_months")
+    agg = agg.join(active_months)
+    agg["active_month_ratio"] = agg["n_active_months"] / (
+        (agg["days_from_first_purchase_to_reference"].replace(0, np.nan) + 1) / 30.0
+    )
+
+    month_counts = order_calendar.groupby(["cust_id", "order_month"]).size().unstack(fill_value=0)
+    month_shares = month_counts.div(month_counts.sum(axis=1), axis=0)
+    agg["top_month_share"] = month_shares.max(axis=1)
+    agg["n_active_purchase_months"] = (month_counts > 0).sum(axis=1)
+    agg["month_purchase_entropy"] = -(month_shares * np.log(month_shares.replace(0, np.nan))).sum(axis=1).fillna(0)
+
+    quarter_counts = order_calendar.groupby(["cust_id", "order_quarter"]).size().unstack(fill_value=0)
+    quarter_shares = quarter_counts.div(quarter_counts.sum(axis=1), axis=0)
+    agg["top_quarter_share"] = quarter_shares.max(axis=1)
+    agg["quarter_purchase_entropy"] = -(quarter_shares * np.log(quarter_shares.replace(0, np.nan))).sum(axis=1).fillna(0)
+    for quarter in [1, 2, 3, 4]:
+        if quarter in quarter_shares.columns:
+            agg[f"purchase_share_q{quarter}"] = quarter_shares[quarter]
+        else:
+            agg[f"purchase_share_q{quarter}"] = 0.0
+
     # @Dorian
     # Outlet behavior
     if "prod_outlet" in df.columns:
@@ -202,6 +286,97 @@ def build_customer_features(df):
     )
     agg = agg.join(sale_stats)
 
+    # Rolling-window customer activity features
+    for days, window_df in windowed_non_returned.items():
+        suffix = f"last_{days}d"
+
+        window_item_count = window_df.groupby("cust_id")["sale_id"].count().rename(f"n_items_{suffix}")
+        window_sale_count = window_df.groupby("cust_id")["sale_id"].nunique().rename(f"n_sales_{suffix}")
+        window_revenue = window_df.groupby("cust_id")["sale_revenue"].sum().rename(f"revenue_{suffix}")
+        window_discount = window_df["sale_discount_applied"].abs().groupby(window_df["cust_id"]).sum().rename(f"discount_{suffix}")
+        window_brand_diversity = window_df.groupby("cust_id")["prod_brand"].nunique().rename(f"n_unique_brands_{suffix}") if "prod_brand" in window_df.columns else None
+
+        agg = agg.join(window_item_count)
+        agg = agg.join(window_sale_count)
+        agg = agg.join(window_revenue)
+        agg = agg.join(window_discount)
+
+        if window_brand_diversity is not None:
+            agg = agg.join(window_brand_diversity)
+
+        if "sale_discount_applied" in window_df.columns:
+            discounted_share = (
+                (window_df["sale_discount_applied"].abs() > 0)
+                .groupby(window_df["cust_id"])
+                .mean()
+                .rename(f"share_discounted_items_{suffix}")
+            )
+            agg = agg.join(discounted_share)
+
+        if "prod_outlet" in window_df.columns:
+            outlet_share = window_df.groupby("cust_id")["prod_outlet"].mean().rename(f"share_outlet_{suffix}")
+            agg = agg.join(outlet_share)
+
+        if "prod_web_only" in window_df.columns:
+            web_only_share = window_df.groupby("cust_id")["prod_web_only"].mean().rename(f"share_web_only_{suffix}")
+            agg = agg.join(web_only_share)
+
+        sale_level_window = (
+            window_df.groupby(["cust_id", "sale_id"])
+            .agg(
+                sale_revenue_sum=("sale_revenue", "sum"),
+                sale_discount_sum=("sale_discount_applied", lambda s: s.abs().sum()),
+                sale_items=("sale_id", "count")
+            )
+            .reset_index()
+        )
+
+        if not sale_level_window.empty:
+            sale_level_window["sale_discount_ratio"] = sale_level_window["sale_discount_sum"] / (
+                sale_level_window["sale_revenue_sum"] + sale_level_window["sale_discount_sum"]
+            ).replace(0, np.nan)
+
+            basket_stats = sale_level_window.groupby("cust_id").agg(
+                **{
+                    f"avg_basket_value_{suffix}": ("sale_revenue_sum", "mean"),
+                    f"median_basket_value_{suffix}": ("sale_revenue_sum", "median"),
+                    f"std_basket_value_{suffix}": ("sale_revenue_sum", lambda s: s.std(ddof=0)),
+                    f"avg_items_per_sale_{suffix}": ("sale_items", "mean"),
+                    f"avg_sale_discount_ratio_{suffix}": ("sale_discount_ratio", "mean"),
+                }
+            )
+            agg = agg.join(basket_stats)
+        else:
+            for col in [
+                f"avg_basket_value_{suffix}",
+                f"median_basket_value_{suffix}",
+                f"std_basket_value_{suffix}",
+                f"avg_items_per_sale_{suffix}",
+                f"avg_sale_discount_ratio_{suffix}",
+            ]:
+                agg[col] = np.nan
+
+    # Relative recency vs longer windows
+    agg["revenue_last_30d_to_90d"] = agg["revenue_last_30d"] / agg["revenue_last_90d"].replace(0, np.nan)
+    agg["revenue_last_90d_to_365d"] = agg["revenue_last_90d"] / agg["revenue_last_365d"].replace(0, np.nan)
+    agg["n_sales_last_30d_to_90d"] = agg["n_sales_last_30d"] / agg["n_sales_last_90d"].replace(0, np.nan)
+    agg["n_sales_last_90d_to_365d"] = agg["n_sales_last_90d"] / agg["n_sales_last_365d"].replace(0, np.nan)
+    agg["avg_basket_value_last_30d_to_total"] = agg["avg_basket_value_last_30d"] / agg["avg_rev_per_sale"].replace(0, np.nan)
+    agg["avg_basket_value_last_90d_to_total"] = agg["avg_basket_value_last_90d"] / agg["avg_rev_per_sale"].replace(0, np.nan)
+    agg["share_discounted_items_last_90d_delta"] = agg["share_discounted_items_last_90d"] - agg["share_discounted_items"]
+    agg["share_outlet_last_90d_delta"] = agg["share_outlet_last_90d"] - agg["share_outlet"]
+    agg["share_web_only_last_90d_delta"] = agg["share_web_only_last_90d"] - agg["share_web_only"]
+    agg["n_unique_brands_last_90d_to_total"] = agg["n_unique_brands_last_90d"] / agg["n_unique_brands"].replace(0, np.nan)
+
+    agg["avg_revenue_per_day_last_90d"] = agg["revenue_last_90d"] / 90
+    agg["observation_days_total"] = agg["days_from_first_purchase_to_reference"] + 1
+    agg["avg_revenue_per_day_total"] = agg["total_revenue_net"] / (
+        agg["observation_days_total"].replace(0, np.nan)
+    )
+    agg["revenue_velocity"] = agg["avg_revenue_per_day_last_90d"] / (
+        agg["avg_revenue_per_day_total"].replace(0, np.nan)
+    )
+
     # @Dorian
     # Returns behavior
     if "prod_brand" in df.columns:
@@ -210,6 +385,44 @@ def build_customer_features(df):
 
     returned_rev = df[df["is_returned"] == 1].groupby("cust_id")["sale_revenue"].sum()
     agg["returned_revenue_sum"] = returned_rev.abs()
+
+    returns_df = df[df["is_returned"] == 1].copy()
+    if not returns_df.empty:
+        returns_df["order_date"] = pd.to_datetime(returns_df["order_date"], errors="coerce")
+        agg["days_since_last_return"] = (
+            reference_date - returns_df.groupby("cust_id")["order_date"].max()
+        ).dt.days
+
+        for days in [90, 180, 365]:
+            start_date = reference_date - pd.Timedelta(days=days - 1)
+            return_window = returns_df[returns_df["order_date"].between(start_date, reference_date)]
+            agg[f"n_returns_last_{days}d"] = return_window.groupby("cust_id")["sale_id"].count()
+
+    agg["returned_revenue_ratio"] = agg["returned_revenue_sum"] / (
+        agg["total_revenue_gross"].replace(0, np.nan)
+    )
+
+    # Buyer preference shifts in the most recent 90 days
+    if "prod_brand" in df.columns:
+        recent_brand_counts = windowed_non_returned[90].groupby(["cust_id", "prod_brand"]).size().unstack(fill_value=0)
+        recent_brand_share = recent_brand_counts.div(recent_brand_counts.sum(axis=1), axis=0)
+        agg["top_brand_share_last_90d"] = recent_brand_share.max(axis=1)
+        agg["top_brand_share_last_90d_delta"] = agg["top_brand_share_last_90d"] - agg["top_brand_share"]
+
+    if "prod_color" in df.columns:
+        recent_color_counts = windowed_non_returned[90].groupby(["cust_id", "prod_color"]).size().unstack(fill_value=0)
+        recent_color_share = recent_color_counts.div(recent_color_counts.sum(axis=1), axis=0)
+        agg["top_color_share_last_90d"] = recent_color_share.max(axis=1)
+        agg["top_color_share_last_90d_delta"] = agg["top_color_share_last_90d"] - agg["top_color_share"]
+
+    for col in ["prod_type_1", "prod_type_3", "prod_type_4", "prod_type_5"]:
+        if col in df.columns:
+            recent_type_counts = windowed_non_returned[90].groupby(["cust_id", col]).size().unstack(fill_value=0)
+            recent_type_share = recent_type_counts.div(recent_type_counts.sum(axis=1), axis=0)
+            agg[f"{col}_dominant_share_last_90d"] = recent_type_share.max(axis=1)
+            agg[f"{col}_dominant_share_last_90d_delta"] = (
+                agg[f"{col}_dominant_share_last_90d"] - agg[f"{col}_dominant_share"]
+            )
 
     # @Dorian
     # Product attribute preferences
@@ -230,7 +443,36 @@ def build_customer_features(df):
 
     # Fill numeric missing values
     numeric_cols = agg.select_dtypes(include=[np.number]).columns
+    agg[numeric_cols] = agg[numeric_cols].replace([np.inf, -np.inf], np.nan)
     agg[numeric_cols] = agg[numeric_cols].fillna(0)
+
+    # Drop one feature from each highly correlated pair to reduce redundancy.
+    highly_correlated_features_to_drop = [
+        "observation_days_total",
+        "days_since_last_purchase",
+        "monetary_per_item",
+        "avg_items_per_sale",
+        "avg_revenue_per_day_last_90d",
+        "median_basket_value_last_30d",
+        "median_basket_value_last_90d",
+        "median_basket_value_last_180d",
+        "n_sales_last_30d_to_90d",
+        "median_basket_value_last_365d",
+        "n_sales_last_90d_to_365d",
+        "avg_last_2_gaps",
+        "avg_sale_discount_ratio",
+        "prod_type_5_dominant_share_last_90d",
+        "prod_type_3_dominant_share_last_90d",
+        "top_color_share_last_90d",
+        "size_median",
+        "avg_basket_value_last_30d",
+        "n_unique_products",
+        "avg_items_per_sale_last_30d",
+        "prod_type_1_dominant_share_last_90d",
+    ]
+    agg = agg.drop(
+        columns=[col for col in highly_correlated_features_to_drop if col in agg.columns]
+    )
 
     return agg.reset_index()
 
@@ -239,6 +481,7 @@ features = build_customer_features(df_tx)
 print("Features are made")
 print(features.head())
 print("Starting enriched features")
+
 
 # Lifetimes packages features
 df_tx["order_date"] = pd.to_datetime(df_tx["order_date"])
@@ -281,4 +524,4 @@ print("Features are enriched with Lifetimes data")
 print(features.head())
 
 # Run to get csv file with features, uncomment to get a csv
-features.to_csv("data/features_enriched.csv", index=False)
+features.to_csv("BigData_assignment1/data/features_enriched.csv", index=False)
